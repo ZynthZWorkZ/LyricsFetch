@@ -42,8 +42,30 @@ You can search for songs in the following formats:
 - `"Artist - Song Title (feat. Other Artist)"`
 - `"Artist1, Artist2 - Song Title"`
 - `"Artist1 & Artist2 - Song Title"`
+- `"Artist1 ft. Artist2 - Song Title"`
+- `"Artist1 featuring Artist2 - Song Title"`
+- `"Artist1 / Artist2 - Song Title"`
 
-The application will automatically try different combinations of the search query to find the best match.
+The application supports advanced search capabilities:
+- Multiple artist separators: `,`, `&`, `ft.`, `feat.`, `featuring`, `/`
+- Automatic handling of remixes and mashups
+- Smart handling of "Part 2" or "Pt 2" variations
+- Fallback searches if the initial search fails
+- Automatic artist name variations and combinations
+
+The search algorithm considers:
+- Exact title matches
+- Artist name matches
+- Word position and relevance
+- Special cases like remixes and mashups
+- Multiple search attempts with different combinations
+
+The application will automatically try different combinations of the search query to find the best match, including:
+- Original query
+- Individual artist searches
+- Title-only searches
+- Various artist combinations
+- Alternative separators
 
 ### Output
 
