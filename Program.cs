@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Net.Http;
 using System.Threading.Tasks;
 using HtmlAgilityPack;
@@ -66,21 +66,99 @@ class Program
             if (titleMatch.Success)
             {
                 string title = titleMatch.Groups[1].Value.ToLower();
-                if (title.Contains(normalizedQuery))
+                
+                // Penalize remixes, mashups, and Pt 2 variations
+                double penalty = 0;
+                if (title.Contains("remix") || title.Contains("(remix)"))
                 {
-                    titleScore = 1.0;
+                    penalty += 0.3; // Penalty for remixes
                 }
+                if (title.Contains("mashup"))
+                {
+                    penalty += 0.3; // Penalty for mashups
+                }
+
+                // Check for Pt 2 variations
+                bool hasPt2 = Regex.IsMatch(title, @"pt\.?\s*2|part\s*2|pt2", RegexOptions.IgnoreCase);
+                bool searchHasPt2 = Regex.IsMatch(normalizedQuery, @"pt\.?\s*2|part\s*2|pt2", RegexOptions.IgnoreCase);
+                
+                // If result has Pt 2 but search doesn't, apply penalty
+                if (hasPt2 && !searchHasPt2)
+                {
+                    penalty += 0.4; // Higher penalty for Pt 2 when not searched for
+                }
+
+                // Extract song title from search query
+                string searchTitle = "";
+                if (normalizedQuery.Contains(" - "))
+                {
+                    searchTitle = normalizedQuery.Split(new[] { " - " }, StringSplitOptions.RemoveEmptyEntries)[1].Trim();
+                }
+                else
+                {
+                    searchTitle = normalizedQuery;
+                }
+
+                // Check for exact title match
+                if (title == searchTitle)
+                {
+                    titleScore = 1.0 - penalty;
+                }
+                // Check if title contains the search title
+                else if (title.Contains(searchTitle))
+                {
+                    titleScore = 0.8 - penalty;
+                }
+                // Check for partial matches
                 else
                 {
                     // Check how many query words are in the title
                     int matchingWords = queryWords.Count(w => title.Contains(w));
-                    titleScore = (double)matchingWords / queryWords.Length;
+                    titleScore = ((double)matchingWords / queryWords.Length) - penalty;
                 }
             }
         }
 
+        // Calculate artist match score
+        double artistScore = 0;
+        var searchArtists = normalizedQuery.Split(new[] { " - " }, StringSplitOptions.RemoveEmptyEntries)[0].ToLower();
+        var searchArtistList = searchArtists.Split(new[] { ",", "&", "ft.", "feat.", "featuring", "/" }, StringSplitOptions.RemoveEmptyEntries)
+                                          .Select(a => a.Trim())
+                                          .Where(a => !string.IsNullOrWhiteSpace(a))
+                                          .ToList();
+
+        // Try different artist patterns
+        var patterns = new[] {
+            @"- ([^-]+)$",
+            @"performed by ([^-]+)$",
+            @"by ([^-]+)$"
+        };
+
+        foreach (var pattern in patterns)
+        {
+            var artistMatch = Regex.Match(normalizedResult, pattern, RegexOptions.IgnoreCase);
+            if (artistMatch.Success)
+            {
+                string resultArtists = artistMatch.Groups[1].Value.ToLower().Trim();
+                var resultArtistList = resultArtists.Split(new[] { ",", "&", "ft.", "feat.", "featuring", "/" }, StringSplitOptions.RemoveEmptyEntries)
+                                                  .Select(a => a.Trim())
+                                                  .Where(a => !string.IsNullOrWhiteSpace(a))
+                                                  .ToList();
+
+                int matchingArtists = 0;
+                foreach (var searchArtist in searchArtistList)
+                {
+                    if (resultArtistList.Any(r => r.Contains(searchArtist) || searchArtist.Contains(r)))
+                    {
+                        matchingArtists++;
+                    }
+                }
+                artistScore = Math.Max(artistScore, (double)matchingArtists / searchArtistList.Count);
+            }
+        }
+
         // Combine scores with weights
-        return (wordMatchScore * 0.4) + (positionScore * 0.3) + (titleScore * 0.3);
+        return (wordMatchScore * 0.2) + (positionScore * 0.1) + (titleScore * 0.5) + (artistScore * 0.2);
     }
 
     static async Task<(string href, string text, double score)?> SearchLyrics(HttpClient client, string searchQuery)
@@ -138,32 +216,35 @@ class Program
             string artistsPart = mainParts[0].Trim();
             string songTitle = mainParts[1].Trim();
 
-            // Split artists by common separators
-            var artists = artistsPart.Split(new[] { ",", "&", "ft.", "feat.", "featuring" }, StringSplitOptions.RemoveEmptyEntries)
-                                   .Select(a => a.Trim())
-                                   .Where(a => !string.IsNullOrWhiteSpace(a))
-                                   .ToList();
+            // Split main artists by common separators
+            var mainArtists = artistsPart.Split(new[] { ",", "&", "ft.", "feat.", "featuring", "/" }, StringSplitOptions.RemoveEmptyEntries)
+                                       .Select(a => a.Trim())
+                                       .Where(a => !string.IsNullOrWhiteSpace(a))
+                                       .ToList();
 
             // Try each artist with the song title
-            foreach (var artist in artists)
+            foreach (var artist in mainArtists)
             {
                 searchAttempts.Add($"{artist} {songTitle}");
             }
 
-            // Try just the song title
+            // Only try just the song title if it's not a single short word
+            if (songTitle.Split(' ').Length > 1 || songTitle.Length > 3)
+            {
             searchAttempts.Add(songTitle);
+            }
 
             // Try first and last artist with song title
-            if (artists.Count > 1)
+            if (mainArtists.Count > 1)
             {
-                searchAttempts.Add($"{artists[0]} {songTitle}");
-                searchAttempts.Add($"{artists[artists.Count - 1]} {songTitle}");
+                searchAttempts.Add($"{mainArtists[0]} {songTitle}");
+                searchAttempts.Add($"{mainArtists[mainArtists.Count - 1]} {songTitle}");
             }
         }
         else
         {
             // If no dash found, try splitting the whole query
-            var parts = originalQuery.Split(new[] { ",", "&", "ft.", "feat.", "featuring" }, StringSplitOptions.RemoveEmptyEntries)
+            var parts = originalQuery.Split(new[] { ",", "&", "ft.", "feat.", "featuring", "/" }, StringSplitOptions.RemoveEmptyEntries)
                                    .Select(p => p.Trim())
                                    .Where(p => !string.IsNullOrWhiteSpace(p))
                                    .ToList();
@@ -171,11 +252,23 @@ class Program
             if (parts.Count > 1)
             {
                 string lastPart = parts.Last();
+                // Only try single-word searches if the word is long enough
+                if (lastPart.Split(' ').Length > 1 || lastPart.Length > 3)
+                {
                 foreach (var part in parts.Take(parts.Count - 1))
                 {
                     searchAttempts.Add($"{part} {lastPart}");
                 }
                 searchAttempts.Add(lastPart);
+                }
+                else
+                {
+                    // If the last part is too short, only try combinations
+                    foreach (var part in parts.Take(parts.Count - 1))
+                    {
+                        searchAttempts.Add($"{part} {lastPart}");
+                    }
+                }
             }
         }
 
@@ -227,208 +320,112 @@ class Program
             return;
         }
 
-        // First split by dash to separate artists from song title
-        var mainParts = searchQuery.Split(new[] { " - " }, StringSplitOptions.RemoveEmptyEntries);
-        if (mainParts.Length > 1)
+        using (var client = new HttpClient())
         {
-            string artistsPart = mainParts[0].Trim();
-            string songTitle = mainParts[1].Trim();
-
-            // Handle parentheses in song title
-            string baseTitle = songTitle;
-            string featuredArtists = "";
-            if (songTitle.Contains("(") && songTitle.Contains(")"))
+            client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
+            try
             {
-                var match = Regex.Match(songTitle, @"(.*?)\s*\((.*?)\)");
-                if (match.Success)
+                Console.WriteLine($"Searching AZLyrics for: {searchQuery}\n");
+
+                // First try with the original query
+                var result = await SearchLyrics(client, searchQuery);
+                
+                // If no results found, try different variations
+                if (!result.HasValue)
                 {
-                    baseTitle = match.Groups[1].Value.Trim();
-                    featuredArtists = match.Groups[2].Value.Trim();
-                }
-            }
-
-            // Split main artists by common separators
-            var mainArtists = artistsPart.Split(new[] { ",", "&" }, StringSplitOptions.RemoveEmptyEntries)
-                                       .Select(a => a.Trim())
-                                       .Where(a => !string.IsNullOrWhiteSpace(a))
-                                       .ToList();
-
-            // Split featured artists if any
-            var featArtists = new List<string>();
-            if (!string.IsNullOrEmpty(featuredArtists))
-            {
-                featArtists = featuredArtists.Split(new[] { ",", "&", "ft.", "feat.", "featuring" }, StringSplitOptions.RemoveEmptyEntries)
-                                           .Select(a => a.Trim())
-                                           .Where(a => !string.IsNullOrWhiteSpace(a))
-                                           .ToList();
-            }
-
-            // Create search attempts
-            var searchAttempts = new List<string>();
-            
-            // Try main artist with base title
-            foreach (var artist in mainArtists)
-            {
-                searchAttempts.Add($"{artist} {baseTitle}");
-            }
-
-            // Try main artist with full title
-            foreach (var artist in mainArtists)
-            {
-                searchAttempts.Add($"{artist} {songTitle}");
-            }
-
-            // Try featured artists with base title
-            foreach (var artist in featArtists)
-            {
-                searchAttempts.Add($"{artist} {baseTitle}");
-            }
-
-            // Try just the base title
-            searchAttempts.Add(baseTitle);
-
-            // Try first main artist with base title
-            if (mainArtists.Count > 0)
-            {
-                searchAttempts.Add($"{mainArtists[0]} {baseTitle}");
-            }
-
-            // Try combinations of main and featured artists
-            if (mainArtists.Count > 0 && featArtists.Count > 0)
-            {
-                searchAttempts.Add($"{mainArtists[0]} {baseTitle} feat {string.Join(" ", featArtists)}");
-            }
-
-            // Clean each search attempt
-            searchAttempts = searchAttempts.Select(CleanSearchQuery).ToList();
-
-            using (var client = new HttpClient())
-            {
-                client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
-                try
-                {
-                    Console.WriteLine($"Searching AZLyrics for: {searchQuery}\n");
-
-                    // Try each search attempt
-                    foreach (var attempt in searchAttempts)
+                    // Try without the dash if it exists
+                    if (searchQuery.Contains(" - "))
                     {
-                        Console.WriteLine($"Trying search: {attempt}");
-                        var result = await SearchLyrics(client, attempt);
-                        if (result.HasValue && result.Value.score > 0.4)
-                        {
-                            Console.WriteLine($"Best match: {result.Value.text}\n{result.Value.href}\n");
-                            
-                            // Fetch lyrics
-                            string lyricsHtml = await client.GetStringAsync(result.Value.href);
-                            var lyricsDoc = new HtmlDocument();
-                            lyricsDoc.LoadHtml(lyricsHtml);
-                            var lyricsDiv = lyricsDoc.DocumentNode.SelectNodes("//div[not(@class) and .//br]")?.FirstOrDefault();
-                            if (lyricsDiv == null)
-                            {
-                                lyricsDiv = lyricsDoc.DocumentNode.SelectNodes("//div[contains(@class, 'ringtone')]/following-sibling::div[1]")?.FirstOrDefault();
-                            }
-
-                            if (lyricsDiv != null)
-                            {
-                                string lyrics = lyricsDiv.InnerText.Trim();
-                                
-                                if (outputToFile)
-                                {
-                                    try
-                                    {
-                                        string filePath = "lyrics.txt";
-                                        File.WriteAllText(filePath, lyrics);
-                                        Console.WriteLine($"Successfully saved lyrics to lyrics.txt");
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        Console.WriteLine($"Error saving to file: {ex.Message}");
-                                    }
-                                }
-                                else
-                                {
-                                    Console.WriteLine("Lyrics:\n");
-                                    Console.WriteLine(lyrics);
-                                }
-                            }
-                            else
-                            {
-                                Console.WriteLine("Could not find lyrics div on the lyrics page.");
-                            }
-                            return;
-                        }
+                        string fallbackQuery = searchQuery.Replace(" - ", " ");
+                        Console.WriteLine($"\nNo results found. Trying alternative search: {fallbackQuery}\n");
+                        result = await SearchLyrics(client, fallbackQuery);
                     }
 
-                    Console.WriteLine("No suitable match found.");
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error: {ex.Message}");
-                }
-            }
-        }
-        else
-        {
-            // If no dash found, try the original search
-            searchQuery = CleanSearchQuery(searchQuery);
-            using (var client = new HttpClient())
-            {
-                client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
-                try
-                {
-                    Console.WriteLine($"Searching AZLyrics for: {searchQuery}\n");
-                    var result = await SearchLyrics(client, searchQuery);
-                    if (result.HasValue)
+                    // If still no results and query contains a slash, try different variations
+                    if (!result.HasValue && searchQuery.Contains("/"))
                     {
-                        Console.WriteLine($"Best match: {result.Value.text}\n{result.Value.href}\n");
-                        
-                        // Fetch lyrics
-                        string lyricsHtml = await client.GetStringAsync(result.Value.href);
-                        var lyricsDoc = new HtmlDocument();
-                        lyricsDoc.LoadHtml(lyricsHtml);
-                        var lyricsDiv = lyricsDoc.DocumentNode.SelectNodes("//div[not(@class) and .//br]")?.FirstOrDefault();
-                        if (lyricsDiv == null)
-                        {
-                            lyricsDiv = lyricsDoc.DocumentNode.SelectNodes("//div[contains(@class, 'ringtone')]/following-sibling::div[1]")?.FirstOrDefault();
-                        }
+                        // Try with space instead of slash
+                        string slashQuery = searchQuery.Replace("/", " ");
+                        Console.WriteLine($"\nNo results found. Trying alternative search: {slashQuery}\n");
+                        result = await SearchLyrics(client, slashQuery);
 
-                        if (lyricsDiv != null)
+                        // If still no results, try each artist individually
+                        if (!result.HasValue)
                         {
-                            string lyrics = lyricsDiv.InnerText.Trim();
-                            
-                            if (outputToFile)
+                            var parts = searchQuery.Split(new[] { " - " }, StringSplitOptions.RemoveEmptyEntries);
+                            if (parts.Length > 1)
                             {
-                                try
+                                string songTitle = parts[1].Trim();
+                                var artists = parts[0].Split(new[] { "/" }, StringSplitOptions.RemoveEmptyEntries)
+                                                    .Select(a => a.Trim())
+                                                    .Where(a => !string.IsNullOrWhiteSpace(a))
+                                                    .ToList();
+
+                                foreach (var artist in artists)
                                 {
-                                    string filePath = "lyrics.txt";
-                                    File.WriteAllText(filePath, lyrics);
-                                    Console.WriteLine($"Successfully saved lyrics to lyrics.txt");
-                                }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine($"Error saving to file: {ex.Message}");
+                                    string individualQuery = $"{artist} - {songTitle}";
+                                    Console.WriteLine($"\nTrying individual artist search: {individualQuery}\n");
+                                    result = await SearchLyrics(client, individualQuery);
+                                    if (result.HasValue)
+                                    {
+                                        break;
+                                    }
                                 }
                             }
-                            else
+                        }
+                    }
+                }
+
+                if (result.HasValue)
+                {
+                    Console.WriteLine($"Best match: {result.Value.text}\n{result.Value.href}\n");
+                    
+                    // Fetch lyrics
+                    string lyricsHtml = await client.GetStringAsync(result.Value.href);
+                    var lyricsDoc = new HtmlDocument();
+                    lyricsDoc.LoadHtml(lyricsHtml);
+                    var lyricsDiv = lyricsDoc.DocumentNode.SelectNodes("//div[not(@class) and .//br]")?.FirstOrDefault();
+                    if (lyricsDiv == null)
+                    {
+                        lyricsDiv = lyricsDoc.DocumentNode.SelectNodes("//div[contains(@class, 'ringtone')]/following-sibling::div[1]")?.FirstOrDefault();
+                    }
+
+                    if (lyricsDiv != null)
+                    {
+                        string lyrics = lyricsDiv.InnerText.Trim();
+                        
+                        if (outputToFile)
+                        {
+                            try
                             {
-                                Console.WriteLine("Lyrics:\n");
-                                Console.WriteLine(lyrics);
+                                string filePath = "lyrics.txt";
+                                File.WriteAllText(filePath, lyrics);
+                                Console.WriteLine($"Successfully saved lyrics to lyrics.txt");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Error saving to file: {ex.Message}");
                             }
                         }
                         else
                         {
-                            Console.WriteLine("Could not find lyrics div on the lyrics page.");
+                            Console.WriteLine("Lyrics:\n");
+                            Console.WriteLine(lyrics);
                         }
                     }
                     else
                     {
-                        Console.WriteLine("No suitable match found.");
+                        Console.WriteLine("Could not find lyrics div on the lyrics page.");
                     }
                 }
-                catch (Exception ex)
+                else
                 {
-                    Console.WriteLine($"Error: {ex.Message}");
+                    Console.WriteLine("No suitable match found.");
                 }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
             }
         }
     }
