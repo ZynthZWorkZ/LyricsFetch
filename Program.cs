@@ -88,28 +88,10 @@ class Program
                     penalty += 0.4; // Higher penalty for Pt 2 when not searched for
                 }
 
-                // Extract song title from search query
-                string searchTitle = "";
-                if (normalizedQuery.Contains(" - "))
-                {
-                    searchTitle = normalizedQuery.Split(new[] { " - " }, StringSplitOptions.RemoveEmptyEntries)[1].Trim();
-                }
-                else
-                {
-                    searchTitle = normalizedQuery;
-                }
-
-                // Check for exact title match
-                if (title == searchTitle)
+                if (title.Contains(normalizedQuery))
                 {
                     titleScore = 1.0 - penalty;
                 }
-                // Check if title contains the search title
-                else if (title.Contains(searchTitle))
-                {
-                    titleScore = 0.8 - penalty;
-                }
-                // Check for partial matches
                 else
                 {
                     // Check how many query words are in the title
@@ -158,47 +140,68 @@ class Program
         }
 
         // Combine scores with weights
-        return (wordMatchScore * 0.2) + (positionScore * 0.1) + (titleScore * 0.5) + (artistScore * 0.2);
+        return (wordMatchScore * 0.3) + (positionScore * 0.2) + (titleScore * 0.3) + (artistScore * 0.2);
     }
 
     static async Task<(string href, string text, double score)?> SearchLyrics(HttpClient client, string searchQuery)
     {
         string formattedQuery = HttpUtility.UrlEncode(searchQuery.Replace(' ', '+'));
-        string searchUrl = $"https://search.azlyrics.com/search.php?q={formattedQuery}&x=1aaabdc6f73f84ddda60f8d362182ab3d11f45dbf49385c5d7098eb5bc80e9b4";
-
-        string html = await client.GetStringAsync(searchUrl);
-        var doc = new HtmlDocument();
-        doc.LoadHtml(html);
-
-        var table = doc.DocumentNode.SelectSingleNode("//table[contains(@class, 'table-condensed')]");
-        if (table == null)
+        
+        // Try first URL format
+        string searchUrl1 = $"https://search.azlyrics.com/search.php?q={formattedQuery}&x=1aaabdc6f73f84ddda60f8d362182ab3d11f45dbf49385c5d7098eb5bc80e9b4";
+        var result1 = await TrySearchWithUrl(client, searchUrl1, searchQuery);
+        if (result1.HasValue)
         {
-            return null;
+            return result1;
         }
 
-        var rows = table.SelectNodes(".//tr");
-        if (rows == null || rows.Count == 0)
-        {
-            return null;
-        }
+        // Try second URL format as fallback
+        string searchUrl2 = $"https://search.azlyrics.com/?q={formattedQuery}&x=1c4c543a750e03040717042df81160e8879de9efc44b5691c99cb0a7eaad8b3f";
+        return await TrySearchWithUrl(client, searchUrl2, searchQuery);
+    }
 
-        var results = new List<(string href, string text, double score)>();
-        foreach (var row in rows)
+    static async Task<(string href, string text, double score)?> TrySearchWithUrl(HttpClient client, string searchUrl, string searchQuery)
+    {
+        try
         {
-            var linkNode = row.SelectSingleNode(".//a");
-            if (linkNode != null)
+            string html = await client.GetStringAsync(searchUrl);
+            var doc = new HtmlDocument();
+            doc.LoadHtml(html);
+
+            var table = doc.DocumentNode.SelectSingleNode("//table[contains(@class, 'table-condensed')]");
+            if (table == null)
             {
-                string href = linkNode.GetAttributeValue("href", "");
-                string text = linkNode.InnerText.Trim();
-                double score = CalculateMatchScore(searchQuery, text);
-                results.Add((href, text, score));
+                return null;
             }
+
+            var rows = table.SelectNodes(".//tr");
+            if (rows == null || rows.Count == 0)
+            {
+                return null;
+            }
+
+            var results = new List<(string href, string text, double score)>();
+            foreach (var row in rows)
+            {
+                var linkNode = row.SelectSingleNode(".//a");
+                if (linkNode != null)
+                {
+                    string href = linkNode.GetAttributeValue("href", "");
+                    string text = linkNode.InnerText.Trim();
+                    double score = CalculateMatchScore(searchQuery, text);
+                    results.Add((href, text, score));
+                }
+            }
+
+            // Sort results by score in descending order
+            results.Sort((a, b) => b.score.CompareTo(a.score));
+
+            return results.Count > 0 ? results[0] : null;
         }
-
-        // Sort results by score in descending order
-        results.Sort((a, b) => b.score.CompareTo(a.score));
-
-        return results.Count > 0 ? results[0] : null;
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     static async Task<(string href, string text, double score)?> AdvancedSearch(HttpClient client, string originalQuery)
@@ -218,9 +221,9 @@ class Program
 
             // Split main artists by common separators
             var mainArtists = artistsPart.Split(new[] { ",", "&", "ft.", "feat.", "featuring", "/" }, StringSplitOptions.RemoveEmptyEntries)
-                                       .Select(a => a.Trim())
-                                       .Where(a => !string.IsNullOrWhiteSpace(a))
-                                       .ToList();
+                                   .Select(a => a.Trim())
+                                   .Where(a => !string.IsNullOrWhiteSpace(a))
+                                   .ToList();
 
             // Try each artist with the song title
             foreach (var artist in mainArtists)
@@ -321,11 +324,11 @@ class Program
         }
 
         using (var client = new HttpClient())
-        {
-            client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
-            try
             {
-                Console.WriteLine($"Searching AZLyrics for: {searchQuery}\n");
+                client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
+                try
+                {
+                    Console.WriteLine($"Searching AZLyrics for: {searchQuery}\n");
 
                 // First try with the original query
                 var result = await SearchLyrics(client, searchQuery);
@@ -377,55 +380,55 @@ class Program
                 }
 
                 if (result.HasValue)
-                {
-                    Console.WriteLine($"Best match: {result.Value.text}\n{result.Value.href}\n");
-                    
-                    // Fetch lyrics
-                    string lyricsHtml = await client.GetStringAsync(result.Value.href);
-                    var lyricsDoc = new HtmlDocument();
-                    lyricsDoc.LoadHtml(lyricsHtml);
-                    var lyricsDiv = lyricsDoc.DocumentNode.SelectNodes("//div[not(@class) and .//br]")?.FirstOrDefault();
-                    if (lyricsDiv == null)
                     {
-                        lyricsDiv = lyricsDoc.DocumentNode.SelectNodes("//div[contains(@class, 'ringtone')]/following-sibling::div[1]")?.FirstOrDefault();
-                    }
-
-                    if (lyricsDiv != null)
-                    {
-                        string lyrics = lyricsDiv.InnerText.Trim();
+                        Console.WriteLine($"Best match: {result.Value.text}\n{result.Value.href}\n");
                         
-                        if (outputToFile)
+                        // Fetch lyrics
+                        string lyricsHtml = await client.GetStringAsync(result.Value.href);
+                        var lyricsDoc = new HtmlDocument();
+                        lyricsDoc.LoadHtml(lyricsHtml);
+                        var lyricsDiv = lyricsDoc.DocumentNode.SelectNodes("//div[not(@class) and .//br]")?.FirstOrDefault();
+                        if (lyricsDiv == null)
                         {
-                            try
+                            lyricsDiv = lyricsDoc.DocumentNode.SelectNodes("//div[contains(@class, 'ringtone')]/following-sibling::div[1]")?.FirstOrDefault();
+                        }
+
+                        if (lyricsDiv != null)
+                        {
+                            string lyrics = lyricsDiv.InnerText.Trim();
+                            
+                            if (outputToFile)
                             {
-                                string filePath = "lyrics.txt";
-                                File.WriteAllText(filePath, lyrics);
-                                Console.WriteLine($"Successfully saved lyrics to lyrics.txt");
+                                try
+                                {
+                                    string filePath = "lyrics.txt";
+                                    File.WriteAllText(filePath, lyrics);
+                                    Console.WriteLine($"Successfully saved lyrics to lyrics.txt");
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"Error saving to file: {ex.Message}");
+                                }
                             }
-                            catch (Exception ex)
+                            else
                             {
-                                Console.WriteLine($"Error saving to file: {ex.Message}");
+                                Console.WriteLine("Lyrics:\n");
+                                Console.WriteLine(lyrics);
                             }
                         }
                         else
                         {
-                            Console.WriteLine("Lyrics:\n");
-                            Console.WriteLine(lyrics);
+                            Console.WriteLine("Could not find lyrics div on the lyrics page.");
                         }
                     }
                     else
                     {
-                        Console.WriteLine("Could not find lyrics div on the lyrics page.");
+                        Console.WriteLine("No suitable match found.");
                     }
                 }
-                else
+                catch (Exception ex)
                 {
-                    Console.WriteLine("No suitable match found.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error: {ex.Message}");
+                    Console.WriteLine($"Error: {ex.Message}");
             }
         }
     }
